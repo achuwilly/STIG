@@ -1,0 +1,200 @@
+#!/bin/bash
+
+echo "Checking content view..." ;
+CV=`subscription-manager identity | grep "^environment" | awk -F'/' '{print $2}'` ;
+
+case $CV in
+  "CV-RHEL8_6-Upgrade" ) TARGET_RELEASE="8.6" ;;
+  "CV-RHEL-8_8-Upgrade" ) TARGET_RELEASE="8.8" ;;
+  "CV-RHEL-8_9-Upgrade" ) TARGET_RELEASE="8.9" ;;
+  "CV-RHEL-8_10-Upgrade" ) TARGET_RELEASE="8.10" ;;
+  * ) echo "CV $CV does not match required CV of CV-RHEL8_6-Uprade, CV-RHEL8_8-Upgrade, CV_RHEL8_9-Upgrade, or CV-RHEL8_10-Upgrade. Unable to proceed." ;
+      exit 1 ;;
+esac
+
+echo "CV set for RHEL ${TARGET_RELEASE}. Proceeding with pre-upgrade processing..." ;
+
+echo "Installing leapp package..."
+yum -q -y install leapp ;
+
+echo "Checking for multiple kernel-devel package installations..." ;
+KDCT=`rpm -q --last kernel-devel | wc -l` ;
+
+if [ $KDCT -gt 1 ]
+then
+        echo "Found $KDCT kernel-devel packages installed. Removing all but latest..." ;
+        KDKEEP=`rpm -q --last kernel-devel | head -1 | awk '{print $1}'` ;
+        KDREMOVE=`rpm -q --last kernel-devel | grep -v $KDKEEP | awk '{print $1}'` ;
+        yum erase -y -q $KDREMOVE ;
+fi
+
+echo "Checking for openssl11 package installation..." ;
+SSLCT=`rpm -qa | grep "^openssl11" | wc -l` ;
+if [ $SSLCT -ne 0 ]
+then
+        echo "Found $SSLCT openssl11 packages installed  and removing them..." ;
+        yum -q -y erase openssl11\* ;
+fi
+
+echo "Checking for btrfs-progs package installation..." ;
+BTCT=`rpm -qa | grep "^btrfs-progs" | wc -l` ;
+
+if [ $BTCT -ne 0 ]
+then
+        echo "Found $BTCT btrfs-progs packages installed and removing them..." ;
+        yum -q -y erase btrfs-progs ;
+fi
+
+echo "Checking for brotli/libbrotli package installation..." ;
+BROTCT=`rpm -qa | grep "^brotli" | wc -l` ;
+BROTLIBCT=`rpm -qa | grep "^libbrotli" | wc -l` ;
+
+if [ $BROTCT -ne 0 ]
+then
+        echo "Found $BROTCT brotli packages installed and removing them..." ;
+        yum -q -y erase brotli ;
+fi
+
+if [ $BROTLIBCT -ne 0 ]
+then
+        echo "Found $BROTLIBCT libbrotli packages installed and removing them..." ;
+        yum -q -y erase libbrotli ;
+fi
+
+echo "Checking for python36-PyYAML package installation..." ;
+PYCT=`rpm -qa | grep "^python36-PyYAML" | wc -l` ;
+echo "Checking for python36-PyYAML package installation..." ;
+PYCT=`rpm -qa | grep "^python36-PyYAML" | wc -l` ;
+if [ $PYCT -ne 0 ]
+then
+                echo "Found python36-PyYAML package installed and removing..." ;
+                yum -q -y erase python36-PyYAML ;
+fi
+
+echo "Checking for urllib3 conflict..." ;
+IS_PIP=`pip list 2>/dev/null | grep urllib3 | wc -l` ;
+IS_RPM=`rpm -qa | grep python-urllib3 | wc -l` ;
+
+if [ $IS_PIP != 0 ] && [ $IS_RPM != 0 ]
+then
+                echo "Found urllib3 conflict. Resolving..." ;
+                pip uninstall -q --yes urllib3 2>/dev/null ;
+                yum -q -y reinstall python-urllib3 2>/dev/null ;
+else
+                echo "No urllib3 conflict found." ;
+fi
+
+echo "Checking if pata_acpi kernel module loaded..." ;
+PATACT=`lsmod | grep pata_acpi | wc -l` ;
+
+if [ $PATACT -ne 0 ]
+then
+        echo "Found pata_acpi module loaded and unloading from running kernel..." ;
+        rmmod pata_acpi ;
+fi
+
+echo "Checking if btrfs kernel module loaded..." ;
+BTKMCT=`lsmod | grep btrfs | wc -l` ;
+if [ $BTKMCT -ne 0 ]
+then
+        echo "Found btrfs module loaded and unloading from running kernel..." ;
+        rmmod btrfs ;
+fi
+
+echo "Checking if floppy kernel module loaded..." ;
+BTKMCT=`lsmod | grep floppy | wc -l` ;
+
+if [ $BTKMCT -ne 0 ]
+then
+        echo "Found floppy module loaded and unloading from running kernel..." ;
+        rmmod floppy ;
+fi
+
+echo "Checking if /home is a symlink..." ;
+if [ -L "/home" ]
+then
+        echo "/home is a symlink. Adjusting to prevent leapp errors..." ;
+        cd / ;
+        ln -snf export/home /home ;
+fi
+
+echo "Checking for Oracle udev rules configuration..." ;
+if [ -f "/etc/udev/rules.d/99-oracle-asmdevices.rules" ]
+then
+                echo "Found 99-oracle-asmdevices.rules file. Checking contents..." ;
+                ISUDEVCT=`grep DUMMY /etc/udev/rules.d/99-oracle-asmdevices.rules | wc -l` ;
+                if [ $ISUDEVCT -eq 1 ]
+                then
+                                echo "Found DUMMY Oracle udev rule..." ;
+                                UDEV_CHECK="Y" ;
+               fi
+fi
+
+echo "Checking for potential device-mapper-multipath conflicts..." ;
+PRODNAME=`dmidecode -s system-product-name` ;
+if [ "$PRODNAME" == "VMware Virtual Platform" ]
+then
+                echo "Found ${PRODNAME} system. Checking for device-mapper-multipath conflicts..." ;
+                DMMCT=`rpm -qa | grep "^device-mapper-multipath" | wc -l` ;
+                if [ $DMMCT -ge 1 ]
+                then
+                                echo "Found ${DMMCT} device-mapper-multipath packages installed. Removing..." ;
+                                yum -q -y erase device-mapper-multipath-* 2>/dev/null ;
+                                DMMRM="Y"
+                fi
+                echo "Checking for leftover multipath.conf files..."
+                if [ -f "/etc/multipath.conf" ]
+                then
+                                echo "Found leftover multipath.conf file. Removing..."
+                                rm -f /etc/multipath.conf ;
+                fi
+                echo "Checking for leftover /etc/multipath directory..." ;
+                if [ -d "/etc/multipath" ]
+                then
+                                echo "Found leftover /etc/multipath directory. Removing..." ;
+                                rm -rf /etc/multipath ;
+                fi
+                echo "Check for potential device-mapper-multipath conflicts completed..." ;fi
+
+echo "Adding standard leapp answers to configuration..." ;
+leapp answer --add --section remove_pam_pkcs11_module_check.confirm=True
+leapp answer --add --section authselect_check.confirm=True
+
+echo "Peforming additional pre-upgrade steps..." ;
+mkdir -p /var/lib/leapp ;
+
+echo "Estimating scratch space required for upgrade..." ;
+export LEAPP_OVL_SIZE=3072 ;
+XFS_SIZE=`expr $(findmnt -t xfs -n -o SOURCE | wc -l) \* $LEAPP_OVL_SIZE` ;
+TMP_SIZE=`expr $XFS_SIZE + 8192` ;
+TOT_SIZE=`expr $TMP_SIZE / 1024` ;
+
+echo "Checking for available space on / file system..." ;
+typeset -i PCTUSED=`df -h / | grep -v "^Filesystem" | awk '{print $5}' | tr -d '%'` ;
+if [ $PCTUSED -gt 70 ]
+then
+                ROOTSPACE="Y" ;
+else
+                ROOTSPACE="N" ;
+                echo "The / file system used space is below 70%. Should be OK for upgrade." ;
+fi
+
+echo "Basic pre-upgrade processing is complete." ;
+echo "Ensure LV for new /var/tmp has been created." ;
+echo "Ensure temporary ${TOT_SIZE}GB disk for /var/lib/leapp has been added before proceeding." ;
+
+if [ "$UDEV_CHECK" == "Y" ]
+then
+                echo -e "\n* * * * Found Oracle udev DUMMY rule. Verify Oracle Storage configuration before proceeding! * * * *" ;
+fi
+then
+                echo -e "\n* * * * Multipath packages removed during pre-script checks. Verify Storage configuration before proceeding! * * * *" ;
+fi
+
+if [ "$ROOTSPACE" == "Y" ]
+then
+                echo -e "\n* * * * The / file system is over 70% full. Additional space may need to be added to complete the upgrade. * * *" ;
+fi
+
+exit 0 ;
+
